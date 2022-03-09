@@ -32,6 +32,7 @@
 
 #include <linux/pm_runtime.h>
 #include <linux/mmc/host.h>
+#include <linux/version.h>
 
 static int _mmc_block_minor = -1;
 
@@ -75,7 +76,11 @@ static struct device *mmcblk_get_device(void)
          * pcmcia_bus_type */
         return NULL;
 #else /* !CONFIG_PROVENCORE_MMC_COMPATIBLE_DEVICE */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
         struct device *dev = part_to_dev(_shdev_mmc_bdev->bd_part);
+#else /* KERNEL_VERSION >= 5,11,0 */
+        struct device *dev = &_shdev_mmc_bdev->bd_device;
+#endif /* LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0) */
         /* mmcblkX->mmcX:0001->mmcX->controller.mmc */
         return dev->parent->parent->parent;
 #endif /* CONFIG_PROVENCORE_MMC_COMPATIBLE_DEVICE */
@@ -207,7 +212,6 @@ static int mmcblk_resume(void)
 }
 
 #ifdef CONFIG_PROVENCORE_MMC_REMOTE_HOST
-#include <linux/version.h>
 #include <linux/mmc/host.h>
 #include <linux/mmc/ioctl.h>
 #include <linux/mmc/mmc.h>
