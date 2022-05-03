@@ -124,6 +124,9 @@ static unsigned long _base = 0;
 static void *_vbase;
 static unsigned long _nr_pages;
 
+/** /dev/trustzone device registration information */
+static bool _device_registered = false;
+
 /** Secure IRQ (possibly virtual). */
 unsigned int _irq;
 
@@ -197,7 +200,8 @@ static int pnc_miscdev_mmap(struct file *filp, struct vm_area_struct *vma)
 
 static int pnc_miscdev_open(struct inode *inode, struct file *filp)
 {
-    return pnc_session_open((pnc_session_t **)&filp->private_data);
+    return pnc_session_open_with_flags((pnc_session_t **)&filp->private_data,
+        filp->f_flags);
 }
 
 static int pnc_miscdev_release(struct inode *inode, struct file *filp)
@@ -694,12 +698,6 @@ static int __init pnc_init(void)
 
     pr_info("module init (0x%x)\n", REE_VERSION);
 
-    ret = misc_register(&pnc_device);
-    if (ret) {
-        pr_err("(%s) failed to register misc device\n", __func__);
-        return ret;
-    }
-
 #ifdef CONFIG_PROVENCORE_DTS_CONFIGURATION
     /*
      * Lookup the reserved memory area defined in the DTB.
@@ -849,12 +847,11 @@ err_1:
         __free_page(pfn_to_page(pfn));
 #endif /* !CONFIG_PROVENCORE_DTS_CONFIGURATION */
 err_0:
-    misc_deregister(&pnc_device);
     _base = 0;
     return ret;
 }
 
-static void __exit pnc_exit(void)
+static void pnc_exit(void)
 {
 #ifndef CONFIG_PROVENCORE_DTS_CONFIGURATION
     unsigned long p, pfn;
@@ -865,9 +862,14 @@ static void __exit pnc_exit(void)
     if (_base == 0)
         return;
 
+    /* We shouldn't receive any S irq anymore */
+    free_irq(_irq, &pnc_device);
+    /* We can release any process waiting for S readyness... */
+    pnc_sessions_release();
+    /* ...then flush remaining works... */
     flush_work(&_sync_work);
     pnc_sessions_exit();
-    free_irq(_irq, &pnc_device);
+    /* ...and clean remaining resources */
     pnc_smc_exit();
     pnc_shm_exit();
     vunmap(_vbase);
@@ -876,7 +878,24 @@ static void __exit pnc_exit(void)
         __free_page(pfn_to_page(pfn));
     _base = 0;
 #endif /* !CONFIG_PROVENCORE_DTS_CONFIGURATION */
-    misc_deregister(&pnc_device);
+    /* No need to protect _device_registered as the only thread that sets this
+     * variable has stopped working thanks to flush_work(&_sync_work) above */
+    if (_device_registered)
+        misc_deregister(&pnc_device);
+}
+
+int register_device(void)
+{
+    int ret = misc_register(&pnc_device);
+    if (ret) {
+        pr_err("(%s) failed to register misc device\n", __func__);
+        return ret;
+    }
+    /* No need to protect _device_registered here as the only thread that will
+     * read this variable will ensure register_device() has finished before
+     * accessing _device_registered */
+    _device_registered = true;
+    return ret;
 }
 
 module_init(pnc_init);

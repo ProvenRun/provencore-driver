@@ -29,6 +29,7 @@
 #include <linux/err.h>
 #include <linux/delay.h>        // msleep()
 #include <linux/kthread.h>
+#include <linux/sched/task.h>
 
 /* Shared device(s) monitor is a ree session user...*/
 #include "misc/provencore/ree_session.h"
@@ -206,12 +207,28 @@ static int configure(void)
     uint32_t session_pages=SHDEV_PAGES, data_offset=0, infos_offset=0, version;
     shdev_desc_t *desc_ptr;
 
+    /* in case secure world is not ready, we will try 250 times every 20ms: 5s... */
+    int tries = 250;
+
     pr_debug("opening shared devices monitor session\n");
-    ret = pnc_session_open(&_shdev_session);
-    if (ret != 0) {
-        pr_err("open failure for shared devices monitor (%d)\n", ret);
-        return ret;
-    }
+    do {
+        ret = pnc_session_open_with_flags(&_shdev_session, O_NONBLOCK);
+        if (ret == -EAGAIN) {
+            /* Secure world is not ready */
+            if (tries == 0) {
+                pr_err("secure world is not ready. Abort.");
+                return ret;
+            }
+            /* Retry in a few ms */
+            tries--;
+            msleep(20);
+            continue;
+        } else if (ret != 0) {
+            pr_err("open failure for shared devices monitor (%d)\n", ret);
+            return ret;
+        }
+        break;
+    } while(1);
 
 #ifdef CONFIG_PROVENCORE_MMC_REMOTE_HOST
     session_pages += SHDEV_MMC_PAGES;
@@ -439,6 +456,8 @@ static int __init shdev_init(void)
     if (IS_ERR(shdev_task)) {
         return PTR_ERR(shdev_task);
     }
+    /* Increments usage counter: this is required in case configure() fails in shdev_thread */
+    get_task_struct(shdev_task);
     kthread_bind(shdev_task, 0); /* bind to cpu#0 */
     wake_up_process(shdev_task);
     return 0;
@@ -455,6 +474,8 @@ static void __exit shdev_exit(void)
     /* Stop main thread */
     pr_debug("Stopping monitor process\n");
     kthread_stop(shdev_task);
+    /* Decrement usage counter, incremented in shdev_init */
+    put_task_struct(shdev_task);
 
     /* Wait end of any shared device pending work */
 #ifdef CONFIG_PROVENCORE_SHARED_MMC

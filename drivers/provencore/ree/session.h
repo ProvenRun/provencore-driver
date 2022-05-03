@@ -76,4 +76,19 @@ int pnc_session_get_mem_offset(pnc_session_t *session, unsigned long *offset,
  */
 void pnc_sessions_sync(struct work_struct *work);
 
+/**
+ * @brief Release any thread blocked waiting for secure world readyness
+ */
+void pnc_sessions_release(void);
+
+/**
+ * @brief Register the device in linux.
+ *
+ * Create the /dev/trustzone node
+ *
+ * @return      - 0 if success
+ *              - error code if misc_register() fails
+ */
+int register_device(void);
+
 #endif /* _SESSION_H_INCLUDED_ */

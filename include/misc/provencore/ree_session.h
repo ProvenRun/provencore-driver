@@ -25,10 +25,31 @@ typedef struct pnc_session pnc_session_t;
 
 /**
  * @brief Open a new session for communicating with a provencore application.
+ *
+ * Will wait until secure world is ready to initiate session. If secure world
+ * never syncs with normal world, this call blocks indefinitely.
+ * On the other hand, it is a good function to use to sync with secure world if
+ * it is sure secure world will become ready.
+ *
  * @param session       Updated with the pointer to the allocated session handle
  * @return 0 if new session opened, -ENOMEM if no room for new session
  */
 int pnc_session_open(pnc_session_t **session);
+
+/**
+ * @brief Try to open a new session for communicating with a provencore
+ *        application.
+ *
+ * Also forward some \p flags as a bitfield of properties required during open
+ * operation.
+ * List of supported flags:
+ *  - O_NONBLOCK: don't wait for secure world readyness
+ *
+ * @param session       Updated with the pointer to the allocated session handle
+ * @return 0 if new session opened, -ENOMEM if no room for new session, -EAGAIN
+ *         if secure world not ready.
+ */
+int pnc_session_open_with_flags(pnc_session_t **session, unsigned int flags);
 
 /**
  * @brief Close the selected session.

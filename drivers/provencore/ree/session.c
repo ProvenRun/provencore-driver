@@ -71,16 +71,23 @@ struct pnc_session
  * Sessions framework handling
  *
  * At start-up, no session work shall start until secure world signals it is
- * ready to work with SHM. So, @_session_ready is set to false by default and
- * @_session_waitq is used to wait for @_session_ready switching to true.
+ * ready to work with SHM. So, @_session_ready is set to SESSION_NOT_READY by 
+ * default and @_session_waitq is used to wait for @_session_ready switching to 
+ * SESSION_READY.
  *
- * @_session_ready is also switched to false while running module_exit or upon
- * E_RESET reception. In addition of invalidating SHM header, this is a way to
- * stop all sessions operations until the end of exit or reset.
+ * @_session_ready is also switched to SESSION_ENDED while running module_exit.
+ * Upon E_RESET reception, @_session_ready is set to SESSION_NOT_READY: in 
+ * addition of invalidating SHM header, this is a way to stop all sessions 
+ * operations until the end of exit or reset.
  *
  * A spin_lock is used to protect quick read/write accesses to @_session_ready
  */
-static bool _session_ready = false;
+enum {
+    SESSION_NOT_READY = 0,
+    SESSION_READY,
+    SESSION_ENDED
+};
+static int _session_ready = SESSION_NOT_READY;
 static DECLARE_WAIT_QUEUE_HEAD(_session_waitq);
 static DEFINE_SPINLOCK(_session_lock);
 
@@ -199,7 +206,7 @@ static void invalidate_sessions(void)
 {
     unsigned long flags;
     spin_lock_irqsave(&_session_lock, flags);
-    _session_ready = false;
+    _session_ready = SESSION_NOT_READY;
     pnc_shm_init_header();
     spin_unlock_irqrestore(&_session_lock, flags);
 }
@@ -593,7 +600,7 @@ irqreturn_t pnc_session_interrupt_handler(int irq, void *dev_id)
     void *shm_base;
     pnc_header_t *header;
 
-    if (!_session_ready) {
+    if (_session_ready == SESSION_NOT_READY) {
         /* Could be an interrupt from secure world to indicate it is ready to
          * use SHM: check for it.
          */
@@ -610,7 +617,7 @@ irqreturn_t pnc_session_interrupt_handler(int irq, void *dev_id)
              * Unlock any client waiting to open new session.
              */
             spin_lock(&_session_lock);
-            _session_ready = true;
+            _session_ready = SESSION_READY;
             spin_unlock(&_session_lock);
             wake_up_all(&_session_waitq);
 
@@ -749,11 +756,35 @@ int pnc_session_get_mem_offset(pnc_session_t *session,
 void pnc_sessions_sync(struct work_struct *work)
 {
     (void)work;
+    int ret;
+    unsigned long lock_flags;
+    uint32_t local_sessions;
 
     /* Wait for global synchro between NS and S regarding SHM initialization */
-    wait_event(_session_waitq, _session_ready);
+    wait_event(_session_waitq, (_session_ready != SESSION_NOT_READY));
 
-    pr_info("Framework ready with version 0x%x\n", _ree_version);
+    spin_lock_irqsave(&_session_lock, lock_flags);
+    local_sessions = _session_ready;
+    spin_unlock_irqrestore(&_session_lock, lock_flags);
+    if (local_sessions == SESSION_READY) {
+        /* Now that the driver is synchronized with ProvenCore, register the device */
+        ret = register_device();
+        if (ret) {
+            return;
+        }
+        pr_info("Framework ready with version 0x%x\n", _ree_version);
+    } else {
+        pr_info("REE synchro. aborted.\n");
+    }
+}
+
+void pnc_sessions_release(void)
+{
+    unsigned long lock_flags;
+    spin_lock_irqsave(&_session_lock, lock_flags);
+    _session_ready = SESSION_ENDED;
+    spin_unlock_irqrestore(&_session_lock, lock_flags);
+    wake_up_all(&_session_waitq);
 }
 
 /* ========================================================================== *
@@ -784,7 +815,7 @@ static int check_session_configured(pnc_session_t *s)
     spin_lock_irqsave(&_session_lock, flags);
     local_sessions = _session_ready;
     spin_unlock_irqrestore(&_session_lock, flags);
-    if (!local_sessions) {
+    if (local_sessions != SESSION_READY) {
         pr_warn("(%s) session framework disabled\n", __func__);
         return -EAGAIN;
     }
@@ -1055,12 +1086,38 @@ static int get_response(pnc_session_t *s, uint32_t *response)
     return 0;
 }
 
-int pnc_session_open(pnc_session_t **session)
+static int _session_open(pnc_session_t **session, unsigned int flags)
 {
     unsigned int index;
+    unsigned long lock_flags;
+    uint32_t local_sessions;
 
-    /* Wait for global synchro between NS and S regarding SHM initialization */
-    wait_event(_session_waitq, _session_ready);
+    pr_debug("%s: flags: 0x%x\n", __func__, flags);
+
+    if (flags & O_NONBLOCK) {
+        /* Don't wait for secure world if not ready */
+        goto check_ready;
+    }
+
+    /* By default, wait for global synchro between NS and S regarding SHM 
+     * initialization */
+    wait_event(_session_waitq, (_session_ready != SESSION_NOT_READY));
+
+    /* Check if secure world is ready */
+check_ready:
+    spin_lock_irqsave(&_session_lock, lock_flags);
+    local_sessions = _session_ready;
+    spin_unlock_irqrestore(&_session_lock, lock_flags);
+    if (local_sessions != SESSION_READY) {
+        /* Secure world is not ready yet */
+        if (flags & O_NONBLOCK) {
+            /* This may be acceptable */
+            return -EAGAIN;
+        }
+        /* This is an error */
+        pr_err("(%s) secure world is not ready.\n", __func__);
+        return -ENOENT;
+    }
 
     mutex_lock(&_sessions_mutex);
     /* Allocate a session handle. */
@@ -1080,7 +1137,18 @@ int pnc_session_open(pnc_session_t **session)
     pr_err("(%s) no free session slot\n", __func__);
     return -ENOMEM;
 }
+
+int pnc_session_open(pnc_session_t **session)
+{
+    return _session_open(session, 0);
+}
 EXPORT_SYMBOL(pnc_session_open);
+
+int pnc_session_open_with_flags(pnc_session_t **session, unsigned int flags)
+{
+    return _session_open(session, flags);
+}
+EXPORT_SYMBOL(pnc_session_open_with_flags);
 
 void pnc_session_close(pnc_session_t *session)
 {
@@ -1154,7 +1222,7 @@ static int configure_session(pnc_session_t *s, uint64_t sid, const char *name)
     spin_lock_irqsave(&_session_lock, flags);
     local_sessions = _session_ready;
     spin_unlock_irqrestore(&_session_lock, flags);
-    if (!local_sessions) {
+    if (local_sessions != SESSION_READY) {
         pr_err("(%s) session framework disabled\n", __func__);
         return -EAGAIN;
     }
