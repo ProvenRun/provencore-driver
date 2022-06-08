@@ -106,8 +106,12 @@
  *     add support for direct configuration to a service by its name (string) to 
  *     the kernel API.
  *          See 3.02 changelog for feature details
+ *
+ * - 3.04:
+ *     register /dev/trustzone only when ProvenCore is in sync with Linux
+ *     rework internal session status
  */
-#define REE_VERSION         UINT32_C(0x303) /* 3.03 */
+#define REE_VERSION         UINT32_C(0x304) /* 3.04 */
 
 /**
  * @brief List of NS <--> S notifications.
