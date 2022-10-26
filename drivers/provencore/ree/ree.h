@@ -110,8 +110,11 @@
  * - 3.04:
  *     register /dev/trustzone only when ProvenCore is in sync with Linux
  *     rework internal session status
+ *
+ * - 3.05:
+ *     fix handling of session config failure in secure world.
  */
-#define REE_VERSION         UINT32_C(0x304) /* 3.04 */
+#define REE_VERSION         UINT32_C(0x305) /* 3.05 */
 
 /**
  * @brief List of NS <--> S notifications.
